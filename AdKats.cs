@@ -396,6 +396,8 @@ namespace PRoConEvents
         private List<String> _CommandTargetWhitelistCommands = new List<string>();
         private Int32 _RequiredReasonLength = 4;
         private Int32 _minimumAssistMinutes = 5;
+        //Stats/Leaderboard Blacklisted Players
+        private List<String> _LeaderboardBlacklistedPlayers = new List<string>();
         //Commands specific
         private String _ServerVoipAddress = "Enter teamspeak/discord/etc address here.";
         //Dynamic access
@@ -1604,6 +1606,7 @@ namespace PRoConEvents
                     buildList.Add(new CPluginVariable(GetSettingSection("5") + t + "Reserved slot grants access to squad lead command", typeof(Boolean), _ReservedSquadLead));
                     buildList.Add(new CPluginVariable(GetSettingSection("5") + t + "Reserved slot grants access to self-move command", typeof(Boolean), _ReservedSelfMove));
                     buildList.Add(new CPluginVariable(GetSettingSection("5") + t + "Reserved slot grants access to self-kill command", typeof(Boolean), _ReservedSelfKill));
+                    buildList.Add(new CPluginVariable(GetSettingSection("5") + t + "Leaderboard Blacklisted Players", typeof(String[]), _LeaderboardBlacklistedPlayers.ToArray()));
                 }
                 lstReturn.AddRange(buildList);
             }
@@ -7054,6 +7057,21 @@ namespace PRoConEvents
                     _ExternalAdminCommands = new List<String>(CPluginVariable.DecodeStringArray(strValue));
                     //Once setting has been changed, upload the change to database
                     QueueSettingForUpload(new CPluginVariable(@"External plugin admin commands", typeof(String), CPluginVariable.EncodeStringArray(_ExternalAdminCommands.ToArray())));
+                }
+                else if (Regex.Match(strVariable, @"Leaderboard Blacklisted Players").Success)
+                {
+                    List<String> LeaderboardBlacklistedPlayersList = new List<String>(CPluginVariable.DecodeStringArray(strValue));
+                    if (!_LeaderboardBlacklistedPlayers.SequenceEqual(LeaderboardBlacklistedPlayersList))
+                    {
+                        _LeaderboardBlacklistedPlayers.Clear();
+                        foreach (String line in LeaderboardBlacklistedPlayersList.Where(message => !String.IsNullOrEmpty(message)).ToList())
+                        {
+                            _spamBotSayQueue.Enqueue(line);
+                        }
+                    }
+                    _LeaderboardBlacklistedPlayers = new List<String>(CPluginVariable.DecodeStringArray(strValue));
+                    //Once setting has been changed, upload the change to database
+                    QueueSettingForUpload(new CPluginVariable(@"Leaderboard Blacklisted Players", typeof(String), CPluginVariable.EncodeStringArray(_LeaderboardBlacklistedPlayers.ToArray())));
                 }
                 else if (Regex.Match(strVariable, @"Command Target Whitelist Commands").Success)
                 {
@@ -16875,6 +16893,8 @@ namespace PRoConEvents
                     {
                         return;
                     }
+
+                    UpdatePlayer(aPlayer, true);
 
                     //Fetch teams
                     ATeam team1, team2;
@@ -39323,6 +39343,7 @@ namespace PRoConEvents
                 QueueSettingForUpload(new CPluginVariable(@"Reserved slot grants access to squad lead command", typeof(Boolean), _ReservedSquadLead));
                 QueueSettingForUpload(new CPluginVariable(@"Reserved slot grants access to self-move command", typeof(Boolean), _ReservedSelfMove));
                 QueueSettingForUpload(new CPluginVariable(@"Reserved slot grants access to self-kill command", typeof(Boolean), _ReservedSelfKill));
+                QueueSettingForUpload(new CPluginVariable(@"Leaderboard Blacklisted Players", typeof(String), CPluginVariable.EncodeStringArray(_LeaderboardBlacklistedPlayers.ToArray())));
                 QueueSettingForUpload(new CPluginVariable(@"Banned Tags", typeof(String), CPluginVariable.EncodeStringArray(_BannedTags)));
                 QueueSettingForUpload(new CPluginVariable(@"Punishment Hierarchy", typeof(String), CPluginVariable.EncodeStringArray(_PunishmentHierarchy)));
                 QueueSettingForUpload(new CPluginVariable(@"Combine Server Punishments", typeof(Boolean), _CombineServerPunishments));
@@ -42922,7 +42943,7 @@ namespace PRoConEvents
             return new List<APlayer>();
         }
 
-        private APlayer UpdatePlayer(APlayer aPlayer)
+        private APlayer UpdatePlayer(APlayer aPlayer, bool UpdateGUID = false)
         {
             Log.Debug(() => "updatePlayer starting!", 6);
             //Make sure database connection active
@@ -42936,7 +42957,7 @@ namespace PRoConEvents
             }
             else
             {
-                try
+                if (UpdateGUID == true)
                 {
                     using (MySqlConnection connection = GetDatabaseConnection())
                     {
@@ -42945,21 +42966,13 @@ namespace PRoConEvents
                             //Set the insert command structure
                             command.CommandText = @"
                             UPDATE IGNORE
-                                `tbl_playerdata`
+                                `adkats_battlelog_players`
                             SET
-                                `SoldierName` = @player_name,
-                                `EAGUID` = @player_guid,
-                                `ClanTag` = @player_clanTag,
-                                `IP_Address` = @player_ip,
-                                `DiscordID` = @player_discord_id
+                                `ea_guid` = @player_guid
                             WHERE
-                                `PlayerID` = @player_id";
+                                `player_id` = @player_id";
                             command.Parameters.AddWithValue("@player_id", aPlayer.player_id);
-                            command.Parameters.AddWithValue("@player_name", aPlayer.player_name);
                             command.Parameters.AddWithValue("@player_guid", aPlayer.player_guid);
-                            command.Parameters.AddWithValue("@player_clanTag", String.IsNullOrEmpty(aPlayer.player_clanTag) ? "" : aPlayer.player_clanTag);
-                            command.Parameters.AddWithValue("@player_ip", String.IsNullOrEmpty(aPlayer.player_ip) ? null : aPlayer.player_ip);
-                            command.Parameters.AddWithValue("@player_discord_id", String.IsNullOrEmpty(aPlayer.player_discord_id) ? null : aPlayer.player_discord_id);
                             //Attempt to execute the query
                             if (SafeExecuteNonQuery(command) > 0)
                             {
@@ -42976,25 +42989,92 @@ namespace PRoConEvents
                                 (
                                     `player_id`,
                                     `persona_id`,
-                                    `user_id`
+                                    `user_id`,
+                                    `ea_guid`
                                 )
                                 VALUES
                                 (
                                     @player_id,
                                     @persona_id,
-                                    @user_id
+                                    @user_id,
+                                    @player_guid
                                 )";
                                 command.Parameters.AddWithValue("@player_id", aPlayer.player_id);
                                 command.Parameters.AddWithValue("@persona_id", aPlayer.player_battlelog_personaID);
                                 command.Parameters.AddWithValue("@user_id", aPlayer.player_battlelog_userID);
+                                command.Parameters.AddWithValue("@player_guid", aPlayer.player_guid);
                                 Int32 rowsAffected = SafeExecuteNonQuery(command);
                             }
                         }
                     }
+                    Log.Debug(() => "updatePlayer finished!", 6);
+                    return aPlayer;
                 }
-                catch (Exception e)
+                else
                 {
-                    Log.HandleException(new AException("Error while updating player.", e));
+                    try
+                    {
+                        using (MySqlConnection connection = GetDatabaseConnection())
+                        {
+                            using (MySqlCommand command = connection.CreateCommand())
+                            {
+                                //Set the insert command structure
+                                command.CommandText = @"
+                            UPDATE IGNORE
+                                `tbl_playerdata`
+                            SET
+                                `SoldierName` = @player_name,
+                                `EAGUID` = @player_guid,
+                                `ClanTag` = @player_clanTag,
+                                `IP_Address` = @player_ip,
+                                `DiscordID` = @player_discord_id
+                            WHERE
+                                `PlayerID` = @player_id";
+                                command.Parameters.AddWithValue("@player_id", aPlayer.player_id);
+                                command.Parameters.AddWithValue("@player_name", aPlayer.player_name);
+                                command.Parameters.AddWithValue("@player_guid", aPlayer.player_guid);
+                                command.Parameters.AddWithValue("@player_clanTag", String.IsNullOrEmpty(aPlayer.player_clanTag) ? "" : aPlayer.player_clanTag);
+                                command.Parameters.AddWithValue("@player_ip", String.IsNullOrEmpty(aPlayer.player_ip) ? null : aPlayer.player_ip);
+                                command.Parameters.AddWithValue("@player_discord_id", String.IsNullOrEmpty(aPlayer.player_discord_id) ? null : aPlayer.player_discord_id);
+                                //Attempt to execute the query
+                                if (SafeExecuteNonQuery(command) > 0)
+                                {
+                                    Log.Debug(() => "Update player info success.", 5);
+                                }
+                            }
+                            if (!String.IsNullOrEmpty(aPlayer.player_battlelog_personaID) && !String.IsNullOrEmpty(aPlayer.player_battlelog_personaID) && !aPlayer.BLInfoStored)
+                            {
+                                using (MySqlCommand command = connection.CreateCommand())
+                                {
+                                    command.CommandText = @"
+                                REPLACE INTO
+                                    `adkats_battlelog_players`
+                                (
+                                    `player_id`,
+                                    `persona_id`,
+                                    `user_id`,
+                                    `ea_guid`
+                                )
+                                VALUES
+                                (
+                                    @player_id,
+                                    @persona_id,
+                                    @user_id,
+                                    @player_guid
+                                )";
+                                    command.Parameters.AddWithValue("@player_id", aPlayer.player_id);
+                                    command.Parameters.AddWithValue("@persona_id", aPlayer.player_battlelog_personaID);
+                                    command.Parameters.AddWithValue("@user_id", aPlayer.player_battlelog_userID);
+                                    command.Parameters.AddWithValue("@player_guid", aPlayer.player_guid);
+                                    Int32 rowsAffected = SafeExecuteNonQuery(command);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Log.HandleException(new AException("Error while updating player.", e));
+                    }
                 }
             }
             Log.Debug(() => "updatePlayer finished!", 6);
